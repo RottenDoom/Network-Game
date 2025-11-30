@@ -16,7 +16,7 @@ void GameSession::add_player(uint32_t player_id)
         ps.position                 = protocol::Vec2(400.0f, 300.0f);
         ps.score                    = 0;
         ps.last_processed_input_seq = 0;
-        ps.last_processed_input_ts = 0;
+        ps.last_processed_input_ts  = 0;
         players_[player_id]         = ps;
         std::cout << "Player " << player_id << " joined. Total: " << players_.size() << "\n";
 }
@@ -85,7 +85,7 @@ void GameSession::process_input(uint32_t player_id, const protocol::ClientInput&
 
         // Record last processed input sequence and timestamp for this player so client can reconcile and measure ping
         players_[player_id].last_processed_input_seq = input.seq;
-        players_[player_id].last_processed_input_ts = input.timestamp;
+        players_[player_id].last_processed_input_ts  = input.timestamp;
 }
 
 void GameSession::start()
@@ -112,23 +112,8 @@ void GameSession::start()
                             self->update_game_logic();
             });
 
-        // Start coin spawner
-        coin_spawn_timer_.expires_after(std::chrono::seconds(3));
-        coin_spawn_timer_.async_wait(
-            [self = shared_from_this()](auto ec)
-            {
-                    if (!ec && self->game_running_)
-                    {
-                            self->spawn_coin();
-                            self->coin_spawn_timer_.expires_after(std::chrono::seconds(3));
-                            self->coin_spawn_timer_.async_wait(
-                                [self](auto ec)
-                                {
-                                        if (!ec && self->game_running_)
-                                                self->spawn_coin();
-                                });
-                    }
-            });
+        // Start coin spawner (infinite loop)
+        schedule_coin_spawn();
 }
 
 void GameSession::update_game_logic()
@@ -160,6 +145,24 @@ void GameSession::spawn_coin()
 
         coins_[coin.id] = coin;
         std::cout << "Spawned coin " << coin.id << " at (" << coin.position.x << ", " << coin.position.y << ")\n";
+}
+
+void GameSession::schedule_coin_spawn()
+{
+        if (!game_running_)
+                return;
+
+        coin_spawn_timer_.expires_after(std::chrono::seconds(3));
+        coin_spawn_timer_.async_wait(
+            [self = shared_from_this()](auto ec)
+            {
+                    if (!ec && self->game_running_)
+                    {
+                            self->spawn_coin();
+                            // Schedule next spawn (infinite loop)
+                            self->schedule_coin_spawn();
+                    }
+            });
 }
 
 bool GameSession::check_coin_collision(uint32_t player_id, uint32_t coin_id)

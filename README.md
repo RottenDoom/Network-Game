@@ -48,8 +48,41 @@ A real-time multiplayer game demonstrating client-server architecture with autho
 - CMake 3.20+
 - C++17 compatible compiler (GCC 8+, Clang 7+, MSVC 2019+)
 - Internet connection (for fetching dependencies)
+- SDL2 and SDL2_ttf libraries (or use bundled third-party libraries)
 
-### Linux/macOS
+### Quick Build (Windows)
+
+Use the provided batch script:
+
+```bash
+build-all.bat
+```
+
+This will:
+
+1. Create a `build/build-gcc` directory
+2. Configure CMake
+3. Build both server and client executables
+
+### Manual Build
+
+#### Windows (MinGW/GCC)
+
+```bash
+mkdir build && cd build
+cmake .. -G "MinGW Makefiles"
+cmake --build . --config Release
+```
+
+#### Windows (Visual Studio)
+
+```bash
+mkdir build && cd build
+cmake .. -G "Visual Studio 17 2022" -A x64
+cmake --build . --config Release
+```
+
+#### Linux/macOS
 
 ```bash
 mkdir build && cd build
@@ -57,13 +90,26 @@ cmake ..
 cmake --build . -j$(nproc)
 ```
 
-### Windows
+### Build Output
+
+After building, executables will be located in:
+
+- **Windows**: `build/build-gcc/client.exe` and `build/build-gcc/server.exe`
+- **Linux/macOS**: `build/client` and `build/server`
+
+### Building Documentation
+
+To generate Doxygen documentation:
 
 ```bash
-mkdir build && cd build
-cmake ..
-cmake --build . --config Release
+# Windows
+build_docs.bat
+
+# Linux/macOS (requires Doxygen installed)
+doxygen Doxyfile
 ```
+
+Documentation will be generated in the `docs/html` directory. Open `docs/html/index.html` in your browser to view it.
 
 ## Running the Game
 

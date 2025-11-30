@@ -1,8 +1,21 @@
+/**
+ * @file main.cpp
+ * @brief Client application entry point
+ * @author NetworkGame Project
+ * @date 2024
+ */
+
 #include "client.h"
 #include "renderer.h"
 #include <iostream>
 #include <thread>
 
+/**
+ * @brief Main client application
+ * @param argc Argument count
+ * @param argv Arguments: [host] [port]
+ * @return 0 on success, 1 on error
+ */
 int main(int argc, char* argv[])
 {
         try

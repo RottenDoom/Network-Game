@@ -1,6 +1,19 @@
+/**
+ * @file main.cpp
+ * @brief Server application entry point
+ * @author NetworkGame Project
+ * @date 2024
+ */
+
 #include "server.h"
 #include <iostream>
 
+/**
+ * @brief Main server application
+ * @param argc Argument count
+ * @param argv Arguments: [port]
+ * @return 0 on success, 1 on error
+ */
 int main(int argc, char* argv[])
 {
         try

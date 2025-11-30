@@ -111,7 +111,7 @@ void Renderer::render(const GameClient& client)
         // Draw coins
         for (const auto& [id, coin] : client.get_coins())
         {
-                draw_circle(static_cast<int>(coin.position.x), static_cast<int>(coin.position.y), 20, {255, 215, 0, 255}
+                draw_circle(static_cast<int>(coin.position.x), static_cast<int>(coin.position.y), 15, {255, 215, 0, 255}
                             // Gold
                 );
         }
@@ -121,7 +121,7 @@ void Renderer::render(const GameClient& client)
         for (const auto& [id, player] : client.get_players())
         {
                 SDL_Color color = (id == my_id) ? SDL_Color{0, 255, 0, 255}       // Green for local player
-                                                : SDL_Color{255, 100, 100, 255};  // Red for remote players
+                                                : SDL_Color{100, 150, 255, 255};  // Blue for remote players
 
                 draw_circle(static_cast<int>(player.render_pos.x), static_cast<int>(player.render_pos.y), 25, color);
 
@@ -136,10 +136,10 @@ void Renderer::render(const GameClient& client)
         // Draw instructions
         draw_text("Use WASD or Arrow Keys to move", 10, 10, {200, 200, 200, 255});
 
-        // Draw ping and general UI
-        std::ostringstream ss;
-        ss << "Ping: " << static_cast<int>(client.get_ping_ms()) << " ms";
-        draw_text(ss.str(), width_ - 150, 10, {200, 200, 200, 255});
+        // // Draw ping and general UI
+        // std::ostringstream ss;
+        // ss << "Ping: " << static_cast<int>(client.get_ping_ms()) << " ms";
+        // draw_text(ss.str(), width_ - 150, 10, {200, 200, 200, 255});
 
         // Draw total scores in top-left
         int y = 40;

@@ -464,6 +464,7 @@ void GameClient::handle_game_state(protocol::MessageReader& reader)
                                 }
                         }
                 }
+                // ping_ms_ is already protected by mutex_ lock from handle_game_state()
 
                 // Drop acknowledged inputs from the front of the queue
                 while (!pending_inputs_.empty() && pending_inputs_.front().seq <= server_last_seq_for_me)
@@ -538,5 +539,6 @@ uint32_t GameClient::get_my_id() const
 
 float GameClient::get_ping_ms() const
 {
+        std::lock_guard<std::mutex> lock(mutex_);
         return ping_ms_;
 }
