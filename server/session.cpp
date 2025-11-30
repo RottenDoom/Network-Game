@@ -12,10 +12,11 @@ GameSession::GameSession(asio::io_context& io)
 void GameSession::add_player(uint32_t player_id)
 {
         protocol::PlayerState ps;
-        ps.id               = player_id;
-        ps.position         = protocol::Vec2(400.0f, 300.0f);
-        ps.score            = 0;
-        players_[player_id] = ps;
+        ps.id                       = player_id;
+        ps.position                 = protocol::Vec2(400.0f, 300.0f);
+        ps.score                    = 0;
+        ps.last_processed_input_seq = 0;
+        players_[player_id]         = ps;
         std::cout << "Player " << player_id << " joined. Total: " << players_.size() << "\n";
 }
 
@@ -33,8 +34,10 @@ void GameSession::process_input(uint32_t player_id, const protocol::ClientInput&
 
         auto now = std::chrono::steady_clock::now();
         float dt = std::chrono::duration<float>(now - last_update_).count();
+        // Clamp dt to a sensible maximum to avoid huge jumps after pauses.
+        // If dt is very large (e.g., server was paused), cap to 100ms.
         if (dt > 0.1f)
-                dt = 0.016f;  // Cap at 16ms for first frame
+                dt = 0.1f;
 
         protocol::PlayerState& player = it->second;
 
@@ -67,8 +70,20 @@ void GameSession::process_input(uint32_t player_id, const protocol::ClientInput&
         for (uint32_t coin_id : collected)
         {
                 coins_.erase(coin_id);
-                std::cout << "Player " << player_id << " collected coin. Score: " << player.score << "\n";
+                // Calculate approximate one-way input lag (ms)
+                auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+                                  .count();
+                uint32_t lag_ms = 0;
+                if (input.timestamp <= static_cast<uint32_t>(now_ms))
+                        lag_ms = static_cast<uint32_t>(now_ms) - input.timestamp;
+
+                std::cout << "Player " << player_id << " collected coin. Score: " << player.score
+                          << " (input lag: " << lag_ms << " ms)\n";
         }
+
+        // Record last processed input sequence for this player so client can reconcile
+        players_[player_id].last_processed_input_seq = input.seq;
 }
 
 void GameSession::start()

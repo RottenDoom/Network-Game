@@ -123,6 +123,9 @@ int main(int argc, char* argv[])
 
                         if (dx != 0.0f || dy != 0.0f)
                         {
+                                // Apply local prediction immediately so movement
+                                // feels responsive while waiting for the server.
+                                client.apply_local_input(dx, dy, dt);
                                 client.send_input(dx, dy);
                         }
 

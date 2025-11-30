@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 #include <chrono>
+#include <deque>
 #include <map>
 
 using asio::ip::tcp;
@@ -25,6 +26,8 @@ public:
 
         void connect(const std::string& host, uint16_t port);
         void send_input(float dx, float dy);
+        // Apply local prediction immediately (so movement feels responsive)
+        void apply_local_input(float dx, float dy, float dt);
         void update_interpolation(float dt);
 
         const std::map<uint32_t, InterpolatedPlayer>& get_players() const { return players_; }
@@ -48,8 +51,18 @@ private:
         std::map<uint32_t, InterpolatedPlayer> players_;
         std::map<uint32_t, protocol::CoinState> coins_;
 
+        struct PendingInput
+        {
+                uint32_t seq;
+                float dx, dy;
+                uint32_t timestamp;
+        };
+
+        std::deque<PendingInput> pending_inputs_;
+        uint32_t next_input_seq_;
+
         bool connected_;
         uint32_t my_player_id_;
 
-        const float INTERPOLATION_TIME = 0.1f;  // 100ms interpolation buffer
+        const float INTERPOLATION_TIME = 0.2f;  // 200ms interpolation buffer (matches simulated latency)
 };

@@ -58,10 +58,11 @@ void Connection::read_body(uint32_t length)
                             full_msg.insert(full_msg.end(), self->header_buffer_.begin(), self->header_buffer_.end());
                             full_msg.insert(full_msg.end(), self->body_buffer_.begin(), self->body_buffer_.end());
 
-                            // Simulate 200ms receive latency
-                            self->latency_timer_.expires_after(std::chrono::milliseconds(200));
-                            self->latency_timer_.async_wait(
-                                [self, msg = std::move(full_msg)](auto ec)
+                            // Simulate 200ms receive latency using a per-message timer
+                            auto timer = std::make_shared<asio::steady_timer>(self->socket_.get_executor());
+                            timer->expires_after(std::chrono::milliseconds(200));
+                            timer->async_wait(
+                                [self, msg = std::move(full_msg), timer](auto ec)
                                 {
                                         if (!ec)
                                                 self->process_message(msg);
@@ -89,12 +90,23 @@ void Connection::process_message(const std::vector<uint8_t>& data)
         {
         case protocol::MessageType::CLIENT_CONNECT:
                 std::cout << "Player " << player_id_ << " connected\n";
+
+                // Send assigned player id back to client so it knows which entity
+                // is its own. Use SERVER_START_GAME message with the id.
+                {
+                        protocol::MessageBuffer start_msg;
+                        start_msg.write_header(protocol::MessageType::SERVER_START_GAME);
+                        start_msg.write_uint32(player_id_);
+                        start_msg.finalize();
+                        send_message(start_msg);
+                }
                 break;
 
         case protocol::MessageType::CLIENT_INPUT:
         {
                 protocol::ClientInput input;
-                if (reader.read_float(input.dx) && reader.read_float(input.dy) && reader.read_uint32(input.timestamp))
+                if (reader.read_float(input.dx) && reader.read_float(input.dy) && reader.read_uint32(input.timestamp) &&
+                    reader.read_uint32(input.seq))
                 {
                         server_->process_input(player_id_, input);
                 }
@@ -114,11 +126,12 @@ void Connection::send_message(const protocol::MessageBuffer& msg)
 void Connection::delayed_send(const protocol::MessageBuffer& msg)
 {
         auto self = shared_from_this();
-
-        // Simulate 200ms send latency
-        latency_timer_.expires_after(std::chrono::milliseconds(200));
-        latency_timer_.async_wait(
-            [self, data = msg.data](auto ec)
+        // Simulate 200ms send latency using a per-message timer so broadcasts
+        // and individual messages do not overwrite each other's timers.
+        auto timer = std::make_shared<asio::steady_timer>(self->socket_.get_executor());
+        timer->expires_after(std::chrono::milliseconds(200));
+        timer->async_wait(
+            [self, data = msg.data, timer](auto ec)
             {
                     if (!ec)
                     {

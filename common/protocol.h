@@ -27,6 +27,7 @@ namespace protocol
                 uint32_t id;
                 Vec2 position;
                 uint32_t score;
+                uint32_t last_processed_input_seq;  // appended by server
         };
 
         struct CoinState
@@ -39,6 +40,7 @@ namespace protocol
         {
                 float dx, dy;  // Movement direction
                 uint32_t timestamp;
+                uint32_t seq;  // input sequence number for reconciliation
         };
 
         struct GameStateMessage
@@ -94,6 +96,7 @@ namespace protocol
                         write_uint32(ps.id);
                         write_vec2(ps.position);
                         write_uint32(ps.score);
+                        write_uint32(ps.last_processed_input_seq);
                 }
 
                 void write_coin_state(const CoinState& cs)
@@ -152,7 +155,8 @@ namespace protocol
 
                 bool read_player_state(PlayerState& ps)
                 {
-                        return read_uint32(ps.id) && read_vec2(ps.position) && read_uint32(ps.score);
+                        return read_uint32(ps.id) && read_vec2(ps.position) && read_uint32(ps.score) &&
+                               read_uint32(ps.last_processed_input_seq);
                 }
 
                 bool read_coin_state(CoinState& cs) { return read_uint32(cs.id) && read_vec2(cs.position); }
