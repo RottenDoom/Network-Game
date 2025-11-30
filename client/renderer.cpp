@@ -1,6 +1,11 @@
 #include "renderer.h"
 #include <iostream>
 #include <cmath>
+#include <sstream>
+
+#ifdef USE_SDL_TTF
+#include <SDL2/SDL_ttf.h>
+#endif
 
 Renderer::Renderer(int width, int height)
     : window_(nullptr), renderer_(nullptr), width_(width), height_(height), running_(true)
@@ -20,11 +25,24 @@ bool Renderer::init()
                 return false;
         }
 
-        // if (TTF_Init() < 0)
-        // {
-        //         std::cerr << "TTF init failed: " << TTF_GetError() << "\n";
-        //         return false;
-        // }
+#ifdef USE_SDL_TTF
+        font_        = nullptr;
+        font_loaded_ = false;
+        if (TTF_Init() < 0)
+        {
+                std::cerr << "TTF init failed: " << TTF_GetError() << "\n";
+        }
+        else
+        {
+                // Try to load a font from assets; if missing, font_loaded_ remains false
+                const char* font_path = "assets/Roboto-Regular.ttf";
+                font_                 = TTF_OpenFont(font_path, 16);
+                if (font_)
+                        font_loaded_ = true;
+                else
+                        std::cerr << "Failed to open font '" << font_path << "': " << TTF_GetError() << "\n";
+        }
+#endif
 
         window_ = SDL_CreateWindow(
             "Coin Collector", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width_, height_, SDL_WINDOW_SHOWN);
@@ -51,7 +69,11 @@ void Renderer::cleanup()
                 SDL_DestroyRenderer(renderer_);
         if (window_)
                 SDL_DestroyWindow(window_);
-        // TTF_Quit();
+#ifdef USE_SDL_TTF
+        if (font_)
+                TTF_CloseFont(font_);
+        TTF_Quit();
+#endif
         SDL_Quit();
 }
 
@@ -105,14 +127,57 @@ void Renderer::render(const GameClient& client)
 
                 // Draw score above player
                 std::string score_text = "P" + std::to_string(id) + ": " + std::to_string(player.score);
-                // draw_text(score_text,
-                //           static_cast<int>(player.render_pos.x) - 30,
-                //           static_cast<int>(player.render_pos.y) - 50,
-                //           {255, 255, 255, 255});
+                draw_text(score_text,
+                          static_cast<int>(player.render_pos.x) - 30,
+                          static_cast<int>(player.render_pos.y) - 50,
+                          {255, 255, 255, 255});
         }
 
         // Draw instructions
-        // draw_text("Use WASD or Arrow Keys to move", 10, 10, {200, 200, 200, 255});
+        draw_text("Use WASD or Arrow Keys to move", 10, 10, {200, 200, 200, 255});
+
+        // Draw ping and general UI
+        std::ostringstream ss;
+        ss << "Ping: " << static_cast<int>(client.get_ping_ms()) << " ms";
+        draw_text(ss.str(), width_ - 150, 10, {200, 200, 200, 255});
+
+        // Draw total scores in top-left
+        int y = 40;
+        for (const auto& [id, player] : client.get_players())
+        {
+                std::string s = "P" + std::to_string(id) + ": " + std::to_string(player.score);
+                draw_text(s, 10, y, {240, 240, 240, 255});
+                y += 20;
+        }
 
         SDL_RenderPresent(renderer_);
+}
+
+void Renderer::draw_text(const std::string& text, int x, int y, SDL_Color color)
+{
+#ifdef USE_SDL_TTF
+        if (!font_loaded_ || !font_)
+                return;
+
+        SDL_Color col     = color;
+        SDL_Surface* surf = TTF_RenderUTF8_Blended(font_, text.c_str(), col);
+        if (!surf)
+                return;
+        SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer_, surf);
+        if (!tex)
+        {
+                SDL_FreeSurface(surf);
+                return;
+        }
+        SDL_Rect dst{x, y, surf->w, surf->h};
+        SDL_FreeSurface(surf);
+        SDL_RenderCopy(renderer_, tex, nullptr, &dst);
+        SDL_DestroyTexture(tex);
+#else
+        // TTF not available: nothing to draw
+        (void)text;
+        (void)x;
+        (void)y;
+        (void)color;
+#endif
 }

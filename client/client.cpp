@@ -6,10 +6,12 @@ GameClient::GameClient(asio::io_context& io)
     : io_(io), socket_(io), latency_timer_(io), connected_(false), my_player_id_(0)
 {
         next_input_seq_ = 1;
+        ping_ms_        = 0.0f;
 }
 
 void GameClient::apply_local_input(float dx, float dy, float dt)
 {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (my_player_id_ == 0)
                 return;
 
@@ -41,7 +43,10 @@ void GameClient::connect(const std::string& host, uint16_t port)
         auto endpoints = resolver.resolve(host, std::to_string(port));
 
         asio::connect(socket_, endpoints);
-        connected_ = true;
+        {
+                std::lock_guard<std::mutex> lock(mutex_);
+                connected_ = true;
+        }
 
         std::cout << "Connected to server\n";
 
@@ -70,60 +75,132 @@ void GameClient::send_input(float dx, float dy)
         uint32_t timestamp = static_cast<uint32_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
 
-        uint32_t seq = next_input_seq_++;
+        uint32_t seq;
+        {
+                std::lock_guard<std::mutex> lock(mutex_);
+                seq = next_input_seq_++;
+                // Store pending input for reconciliation
+                pending_inputs_.push_back(PendingInput{seq, dx, dy, timestamp});
+        }
+
         msg.write_uint32(timestamp);
         msg.write_uint32(seq);
         msg.finalize();
 
-        // Store pending input for reconciliation
-        pending_inputs_.push_back(PendingInput{seq, dx, dy, timestamp});
-
-        // Simulate 200ms send latency using a per-message timer so multiple
-        // pending sends don't cancel each other.
-        auto timer = std::make_shared<asio::steady_timer>(io_);
-        timer->expires_after(std::chrono::milliseconds(200));
-        timer->async_wait(
-            [this, data = msg.data, timer](auto ec)
-            {
-                    if (!ec && connected_)
-                    {
-                            asio::async_write(socket_, asio::buffer(data), [](asio::error_code, std::size_t) {});
-                    }
-            });
+        asio::async_write(socket_, asio::buffer(msg.data), [](asio::error_code, std::size_t) {});
 }
 
 void GameClient::update_interpolation(float dt)
 {
-        auto now = std::chrono::steady_clock::now();
-
-        // Exponential smoothing parameters
-        const float SMOOTHING_K_REMOTE = 6.0f;   // higher => faster catch-up for remote players
-        const float SMOOTHING_K_LOCAL  = 10.0f;  // local reconciliation smoothing
-
-        for (auto& [id, player] : players_)
+        std::lock_guard<std::mutex> lock(mutex_);
+        // If we have server snapshots, use them to interpolate remote players
+        if (!snapshot_buffer.empty())
         {
-                // If no time passed, skip
-                if (dt <= 0.0f)
-                        continue;
+                // Use the latest server timestamp as reference
+                uint64_t latest_ts = snapshot_buffer.back().server_ts_ms;
+                uint64_t target_ts = (latest_ts > static_cast<uint64_t>(INTERP_DELAY.count()))
+                                         ? (latest_ts - static_cast<uint64_t>(INTERP_DELAY.count()))
+                                         : latest_ts;
 
-                // Compute per-frame smoothing alpha from a time constant k
-                float k     = (id == my_player_id_) ? SMOOTHING_K_LOCAL : SMOOTHING_K_REMOTE;
-                float alpha = 1.0f - std::exp(-k * dt);
-
-                // Distance to server target
-                float dx      = player.target_pos.x - player.render_pos.x;
-                float dy      = player.target_pos.y - player.render_pos.y;
-                float dist_sq = dx * dx + dy * dy;
-
-                // If we're extremely far from the target (e.g., teleport), snap to avoid slow crawl
-                const float SNAP_DISTANCE_SQ = 200.0f * 200.0f;
-                if (dist_sq > SNAP_DISTANCE_SQ)
+                // For each remote player, interpolate/extrapolate based on snapshots
+                for (auto& [id, player] : players_)
                 {
-                        player.render_pos = player.target_pos;
+                        // Local player handled by prediction/reconciliation; skip snapshot interpolation
+                        if (id == my_player_id_)
+                                continue;
+
+                        // Find two snapshots s0, s1 that bracket target_ts
+                        Snapshot* s0 = nullptr;
+                        Snapshot* s1 = nullptr;
+                        for (size_t i = 0; i + 1 < snapshot_buffer.size(); ++i)
+                        {
+                                if (snapshot_buffer[i].server_ts_ms <= target_ts &&
+                                    snapshot_buffer[i + 1].server_ts_ms >= target_ts)
+                                {
+                                        s0 = &snapshot_buffer[i];
+                                        s1 = &snapshot_buffer[i + 1];
+                                        break;
+                                }
+                        }
+
+                        if (s0 && s1)
+                        {
+                                // Both snapshots contain positions for this player?
+                                auto it0 = s0->player_positions.find(id);
+                                auto it1 = s1->player_positions.find(id);
+                                if (it0 != s0->player_positions.end() && it1 != s1->player_positions.end())
+                                {
+                                        double span = double(s1->server_ts_ms - s0->server_ts_ms);
+                                        double t    = (span > 0.0) ? double(target_ts - s0->server_ts_ms) / span : 0.0;
+                                        // Lerp positions
+                                        player.render_pos.x = static_cast<float>(it0->second.x +
+                                                                                 (it1->second.x - it0->second.x) * t);
+                                        player.render_pos.y = static_cast<float>(it0->second.y +
+                                                                                 (it1->second.y - it0->second.y) * t);
+                                        continue;
+                                }
+                        }
+
+                        // If we couldn't bracket, try extrapolation from last two snapshots
+                        if (snapshot_buffer.size() >= 2)
+                        {
+                                const Snapshot& last = snapshot_buffer.back();
+                                const Snapshot& prev = snapshot_buffer[snapshot_buffer.size() - 2];
+                                auto itLast          = last.player_positions.find(id);
+                                auto itPrev          = prev.player_positions.find(id);
+                                if (itLast != last.player_positions.end() && itPrev != prev.player_positions.end())
+                                {
+                                        double dt_sec = double(last.server_ts_ms - prev.server_ts_ms) / 1000.0;
+                                        if (dt_sec > 0.0)
+                                        {
+                                                float vx = (itLast->second.x - itPrev->second.x) /
+                                                           static_cast<float>(dt_sec);
+                                                float vy = (itLast->second.y - itPrev->second.y) /
+                                                           static_cast<float>(dt_sec);
+                                                double extra_ms     = double(target_ts > last.server_ts_ms
+                                                                                 ? (target_ts - last.server_ts_ms)
+                                                                                 : 0);
+                                                double extra_s      = extra_ms / 1000.0;
+                                                player.render_pos.x = itLast->second.x +
+                                                                      vx * static_cast<float>(extra_s);
+                                                player.render_pos.y = itLast->second.y +
+                                                                      vy * static_cast<float>(extra_s);
+                                                continue;
+                                        }
+                                }
+                        }
+
+                        // Fallback: use target_pos with light smoothing to avoid snapping
+                        const float SMOOTH_FALLBACK  = 8.0f;
+                        float alpha                  = 1.0f - std::exp(-SMOOTH_FALLBACK * dt);
+                        player.render_pos.x         += (player.target_pos.x - player.render_pos.x) * alpha;
+                        player.render_pos.y         += (player.target_pos.y - player.render_pos.y) * alpha;
                 }
-                else
+
+                // Trim old snapshots (keep ~1s of history)
+                uint64_t keep_ms = 1000;
+                while (snapshot_buffer.size() > 1 &&
+                       (snapshot_buffer.back().server_ts_ms - snapshot_buffer.front().server_ts_ms) > keep_ms)
                 {
-                        // Smoothly move render_pos toward target_pos
+                        snapshot_buffer.pop_front();
+                }
+                return;
+        }
+
+        // If no snapshots are available, fallback to previous smoothing behaviour
+        {
+                // Exponential smoothing parameters
+                const float SMOOTHING_K_REMOTE = 6.0f;   // higher => faster catch-up for remote players
+                const float SMOOTHING_K_LOCAL  = 10.0f;  // local reconciliation smoothing
+
+                for (auto& [id, player] : players_)
+                {
+                        if (dt <= 0.0f)
+                                continue;
+                        float k              = (id == my_player_id_) ? SMOOTHING_K_LOCAL : SMOOTHING_K_REMOTE;
+                        float alpha          = 1.0f - std::exp(-k * dt);
+                        float dx             = player.target_pos.x - player.render_pos.x;
+                        float dy             = player.target_pos.y - player.render_pos.y;
                         player.render_pos.x += dx * alpha;
                         player.render_pos.y += dy * alpha;
                 }
@@ -153,7 +230,10 @@ void GameClient::read_header()
                                  else
                                  {
                                          std::cout << "Connection lost: " << ec.message() << "\n";
-                                         connected_ = false;
+                                         {
+                                                 std::lock_guard<std::mutex> lock(mutex_);
+                                                 connected_ = false;
+                                         }
                                  }
                          });
 }
@@ -172,20 +252,13 @@ void GameClient::read_body(uint32_t length)
                                          full_msg.insert(full_msg.end(), header_buffer_.begin(), header_buffer_.end());
                                          full_msg.insert(full_msg.end(), body_buffer_.begin(), body_buffer_.end());
 
-                                         // Simulate 200ms receive latency using a per-message timer
-                                         auto timer = std::make_shared<asio::steady_timer>(io_);
-                                         timer->expires_after(std::chrono::milliseconds(200));
-                                         timer->async_wait(
-                                             [this, msg = std::move(full_msg), timer](auto ec)
-                                             {
-                                                     if (!ec)
-                                                             process_message(msg);
-                                             });
-
+                                         // process immediately — server simulates latency
+                                         process_message(full_msg);
                                          read_header();
                                  }
                                  else
                                  {
+                                         std::lock_guard<std::mutex> lock(mutex_);
                                          connected_ = false;
                                  }
                          });
@@ -210,8 +283,11 @@ void GameClient::process_message(const std::vector<uint8_t>& data)
                 uint32_t assigned_id = 0;
                 if (reader.read_uint32(assigned_id))
                 {
-                        my_player_id_ = assigned_id;
-                        std::cout << "Assigned player ID: " << my_player_id_ << "\n";
+                        {
+                                std::lock_guard<std::mutex> lock(mutex_);
+                                my_player_id_ = assigned_id;
+                        }
+                        std::cout << "Assigned player ID: " << assigned_id << "\n";
                 }
                 break;
         }
@@ -235,6 +311,8 @@ void GameClient::handle_game_state(protocol::MessageReader& reader)
 
         auto now     = std::chrono::steady_clock::now();
 
+        std::lock_guard<std::mutex> lock(mutex_);
+
         // Update players
         std::map<uint32_t, InterpolatedPlayer> new_players;
         auto dist = [](const protocol::Vec2& a, const protocol::Vec2& b)
@@ -245,6 +323,10 @@ void GameClient::handle_game_state(protocol::MessageReader& reader)
         };
 
         uint32_t server_last_seq_for_me = 0;
+        uint32_t server_last_ts_for_me  = 0;
+
+        Snapshot snap;
+        snap.server_ts_ms = timestamp;
 
         for (int i = 0; i < player_count; i++)
         {
@@ -255,6 +337,7 @@ void GameClient::handle_game_state(protocol::MessageReader& reader)
                 if (ps.id == my_player_id_)
                 {
                         server_last_seq_for_me = ps.last_processed_input_seq;
+                        server_last_ts_for_me  = ps.last_processed_input_ts;
                 }
 
                 auto it = players_.find(ps.id);
@@ -336,16 +419,52 @@ void GameClient::handle_game_state(protocol::MessageReader& reader)
                         ip.score           = ps.score;
                         ip.last_update     = now;
                         new_players[ps.id] = ip;
-
-                        // `my_player_id_` is set from the server via SERVER_START_GAME.
-                        // Do not guess it here.
                 }
+
+                // fill snapshot
+                snap.player_positions[ps.id] = ps.position;
+                snap.player_scores[ps.id]    = ps.score;
+                snap.player_last_seq[ps.id]  = ps.last_processed_input_seq;
         }
         players_ = std::move(new_players);
 
-        // Reconciliation for local player: drop acknowledged inputs and reapply pending ones
+        // push snapshot into buffer
+        snapshot_buffer.push_back(std::move(snap));
+
+        // Reconciliation for local player: measure ping, drop acknowledged inputs and reapply pending ones
         if (my_player_id_ != 0 && server_last_seq_for_me != 0)
         {
+                // Measure RTT. Prefer server-echoed input timestamp if available.
+                uint32_t now_ms = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                            std::chrono::steady_clock::now().time_since_epoch())
+                                                            .count());
+
+                if (server_last_ts_for_me != 0)
+                {
+                        uint32_t rtt = (now_ms >= server_last_ts_for_me) ? (now_ms - server_last_ts_for_me) : 0;
+                        if (ping_ms_ <= 0.0f)
+                                ping_ms_ = static_cast<float>(rtt);
+                        else
+                                ping_ms_ = ping_ms_ * 0.8f + static_cast<float>(rtt) * 0.2f;
+                }
+                else
+                {
+                        // Fallback: compute RTT using pending input timestamps and acknowledged seq
+                        uint32_t ack_seq = server_last_seq_for_me;
+                        for (const auto& pi : pending_inputs_)
+                        {
+                                if (pi.seq == ack_seq)
+                                {
+                                        uint32_t rtt = (now_ms >= pi.timestamp) ? (now_ms - pi.timestamp) : 0;
+                                        if (ping_ms_ <= 0.0f)
+                                                ping_ms_ = static_cast<float>(rtt);
+                                        else
+                                                ping_ms_ = ping_ms_ * 0.8f + static_cast<float>(rtt) * 0.2f;
+                                        break;
+                                }
+                        }
+                }
+
                 // Drop acknowledged inputs from the front of the queue
                 while (!pending_inputs_.empty() && pending_inputs_.front().seq <= server_last_seq_for_me)
                         pending_inputs_.pop_front();
@@ -353,21 +472,26 @@ void GameClient::handle_game_state(protocol::MessageReader& reader)
                 auto it = players_.find(my_player_id_);
                 if (it != players_.end())
                 {
-                        // Start from the authoritative position reported by server
-                        protocol::Vec2 recon_pos = it->second.current_pos;
-
-                        const float INPUT_DT     = 0.016f;  // assume ~60Hz
+                        const float INPUT_DT     = 0.016f;  // assume ~60fps
                         const float PLAYER_SPEED = 150.0f;
 
-                        for (const auto& pi : pending_inputs_)
+                        protocol::Vec2 recon_pos = it->second.current_pos;
+                        for (size_t i = 0; i < pending_inputs_.size(); ++i)
                         {
+                                const auto& pi = pending_inputs_[i];
+                                float dt       = 0.016f;
+                                if (i + 1 < pending_inputs_.size())
+                                        dt = (pending_inputs_[i + 1].timestamp - pi.timestamp) / 1000.0f;
+                                else
+                                        dt = 1.0f / 60.0f;  // fallback
+
                                 float len = std::sqrt(pi.dx * pi.dx + pi.dy * pi.dy);
                                 if (len > 0.001f)
                                 {
                                         float nx     = pi.dx / len;
                                         float ny     = pi.dy / len;
-                                        recon_pos.x += nx * PLAYER_SPEED * INPUT_DT;
-                                        recon_pos.y += ny * PLAYER_SPEED * INPUT_DT;
+                                        recon_pos.x += nx * PLAYER_SPEED * dt;
+                                        recon_pos.y += ny * PLAYER_SPEED * dt;
                                 }
                         }
 
@@ -386,4 +510,33 @@ void GameClient::handle_game_state(protocol::MessageReader& reader)
                         break;
                 coins_[cs.id] = cs;
         }
+}
+
+std::map<uint32_t, InterpolatedPlayer> GameClient::get_players() const
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        return players_;
+}
+
+std::map<uint32_t, protocol::CoinState> GameClient::get_coins() const
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        return coins_;
+}
+
+bool GameClient::is_connected() const
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        return connected_;
+}
+
+uint32_t GameClient::get_my_id() const
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        return my_player_id_;
+}
+
+float GameClient::get_ping_ms() const
+{
+        return ping_ms_;
 }

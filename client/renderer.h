@@ -1,7 +1,9 @@
 #pragma once
 #include "client.h"
 #include <SDL2/SDL.h>
-// #include <SDL2/SDL_ttf.h>
+#ifdef USE_SDL_TTF
+#include <SDL2/SDL_ttf.h>
+#endif
 #include <string>
 
 class Renderer
@@ -19,11 +21,14 @@ public:
 
 private:
         void draw_circle(int cx, int cy, int radius, SDL_Color color);
-        // void draw_text(const std::string& text, int x, int y, SDL_Color color);
+        void draw_text(const std::string& text, int x, int y, SDL_Color color);
 
         SDL_Window* window_;
         SDL_Renderer* renderer_;
-        // TTF_Font* font_;
+#ifdef USE_SDL_TTF
+        TTF_Font* font_;
+        bool font_loaded_;
+#endif
 
         int width_;
         int height_;

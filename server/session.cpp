@@ -16,6 +16,7 @@ void GameSession::add_player(uint32_t player_id)
         ps.position                 = protocol::Vec2(400.0f, 300.0f);
         ps.score                    = 0;
         ps.last_processed_input_seq = 0;
+        ps.last_processed_input_ts = 0;
         players_[player_id]         = ps;
         std::cout << "Player " << player_id << " joined. Total: " << players_.size() << "\n";
 }
@@ -82,8 +83,9 @@ void GameSession::process_input(uint32_t player_id, const protocol::ClientInput&
                           << " (input lag: " << lag_ms << " ms)\n";
         }
 
-        // Record last processed input sequence for this player so client can reconcile
+        // Record last processed input sequence and timestamp for this player so client can reconcile and measure ping
         players_[player_id].last_processed_input_seq = input.seq;
+        players_[player_id].last_processed_input_ts = input.timestamp;
 }
 
 void GameSession::start()

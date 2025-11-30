@@ -37,7 +37,7 @@ private:
         bool game_running_;
         const float MAP_WIDTH     = 800.0f;
         const float MAP_HEIGHT    = 600.0f;
-        const float PLAYER_SPEED  = 150.0f;
+        const float PLAYER_SPEED  = 200.0f;
         const float COIN_RADIUS   = 20.0f;
         const float PLAYER_RADIUS = 25.0f;
 };
